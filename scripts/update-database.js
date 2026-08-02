@@ -35,6 +35,8 @@ const PROGRESS_PATH = path.join(__dirname, "..", "data", ".progress.json");
 const CONCURRENCY = 6;
 // Kurze Pause zwischen einzelnen Anfragen-Batches (ms)
 const BATCH_DELAY_MS = 150;
+// Pause zwischen den 366 Tages-Anfragen (ms) – verhindert Rate-Limiting
+const DAY_DELAY_MS = 400;
 // Maximale Anzahl Personen pro Tag, für die wir Pageviews abfragen
 // (mehr als das bringt selten zusätzliche Erkenntnisse, spart aber viele Requests)
 const MAX_PEOPLE_PER_DAY = 120;
@@ -46,21 +48,34 @@ function pad(n) {
 // Anzahl Tage pro Monat (Februar mit 29 Tagen, damit auch der 29.2. erfasst wird)
 const DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
-async function fetchJson(url, retries = 3) {
+// Robustes Abrufen mit exponentiellem Backoff. Beachtet den
+// "Retry-After"-Header bei 429 (Too Many Requests) und versucht es
+// deutlich öfter/länger als früher, statt schnell aufzugeben und
+// stillschweigend eine leere Liste zurückzugeben.
+async function fetchJson(url, retries = 6) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const res = await fetch(url, {
         headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
       });
       if (res.status === 404) return null;
+
+      if (res.status === 429 || res.status === 503) {
+        const retryAfter = parseInt(res.headers.get("retry-after") || "0", 10);
+        const wait = retryAfter > 0 ? retryAfter * 1000 : 1000 * Math.pow(2, attempt);
+        console.warn(`  ! Rate-Limit (${res.status}) bei Versuch ${attempt}/${retries}, warte ${wait}ms…`);
+        await sleep(wait);
+        continue;
+      }
+
       if (!res.ok) throw new Error(`HTTP ${res.status} bei ${url}`);
       return await res.json();
     } catch (err) {
       if (attempt === retries) {
-        console.warn(`  ! Fehlgeschlagen (${retries}x): ${url} -> ${err.message}`);
+        console.warn(`  ! Endgültig fehlgeschlagen (${retries}x): ${url} -> ${err.message}`);
         return null;
       }
-      await sleep(400 * attempt);
+      await sleep(1000 * Math.pow(2, attempt)); // 2s, 4s, 8s, 16s, 32s …
     }
   }
   return null;
@@ -70,14 +85,26 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Holt die Geburtstagsliste eines Tages von der deutschen Wikipedia
+// Holt die Geburtstagsliste eines Tages von der deutschen Wikipedia.
+// Da praktisch jeder Kalendertag zahlreiche bekannte Geburtstage hat,
+// gilt ein leeres Ergebnis als verdächtig und wird zusätzlich zu den
+// Wiederholungsversuchen in fetchJson noch einmal komplett neu versucht.
 async function fetchBirthsForDay(month, day) {
   const url = `https://api.wikimedia.org/feed/v1/wikipedia/de/onthisday/births/${pad(
     month
   )}/${pad(day)}`;
-  const data = await fetchJson(url);
-  if (!data || !Array.isArray(data.births)) return [];
-  return data.births;
+
+  for (let round = 1; round <= 2; round++) {
+    const data = await fetchJson(url);
+    if (data && Array.isArray(data.births) && data.births.length > 0) {
+      return data.births;
+    }
+    if (round < 2) {
+      console.warn(`  ! Leeres Ergebnis für ${pad(month)}-${pad(day)}, versuche es erneut…`);
+      await sleep(3000);
+    }
+  }
+  return [];
 }
 
 // Holt die Abrufzahlen der letzten 30 Tage für einen Wikipedia-Artikel
@@ -222,6 +249,9 @@ async function main() {
         PROGRESS_PATH,
         JSON.stringify({ done: Array.from(processedDays) })
       );
+
+      // Kurze Pause vor dem nächsten Tag, um die Wikipedia-API nicht zu überlasten
+      await sleep(DAY_DELAY_MS);
     }
   }
 
@@ -235,3 +265,8 @@ main().catch((err) => {
   console.error("Abbruch wegen Fehler:", err);
   process.exit(1);
 });
+
+Alles markieren im Code-Feld (Strg+A), löschen, diesen Text einfügen, dann "Commit changes..." → "Commit changes".
+
+1 Nachricht in der Warteschlange. Wird nach der aktuellen Antwort gesendet.
+ja
