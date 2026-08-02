@@ -1,0 +1,39 @@
+name: Monatliche Aktualisierung der Geburtstags-Datenbank
+
+on:
+  # Läuft automatisch am 1. jedes Monats um 03:17 Uhr UTC
+  schedule:
+    - cron: "17 3 1 * *"
+  # Erlaubt zusätzlich das manuelle Auslösen über den "Actions"-Tab auf GitHub
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  update-database:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+
+      - name: Node.js einrichten
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Datenbank aktualisieren
+        run: node scripts/update-database.js
+
+      - name: Änderungen committen und pushen
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/birthdays.json
+          if git diff --cached --quiet; then
+            echo "Keine Änderungen an der Datenbank."
+          else
+            git commit -m "Automatische monatliche Aktualisierung der Geburtstags-Datenbank"
+            git push
+          fi
