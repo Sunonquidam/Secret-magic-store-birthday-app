@@ -1,0 +1,32 @@
+{
+  "01-01": [
+    {
+      "name": "J. D. Salinger",
+      "year": 1919,
+      "description": "US-amerikanischer Schriftsteller, bekannt für \"Der Fänger im Roggen\".",
+      "thumbnail": null,
+      "wikipediaUrl": "https://de.wikipedia.org/wiki/J._D._Salinger",
+      "pageviews30d": 0
+    }
+  ],
+  "08-02": [
+    {
+      "name": "Beispiel-Eintrag",
+      "year": 1970,
+      "description": "Dies ist ein Platzhalter-Eintrag. Die echte Datenbank wird nach dem ersten GitHub-Actions-Lauf automatisch befüllt.",
+      "thumbnail": null,
+      "wikipediaUrl": "https://de.wikipedia.org/",
+      "pageviews30d": 0
+    }
+  ],
+  "12-24": [
+    {
+      "name": "Beispiel-Eintrag",
+      "year": 1980,
+      "description": "Platzhalter – wird durch echte Wikipedia-Daten ersetzt.",
+      "thumbnail": null,
+      "wikipediaUrl": "https://de.wikipedia.org/",
+      "pageviews30d": 0
+    }
+  ]
+}
