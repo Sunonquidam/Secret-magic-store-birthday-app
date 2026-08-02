@@ -265,8 +265,3 @@ main().catch((err) => {
   console.error("Abbruch wegen Fehler:", err);
   process.exit(1);
 });
-
-Alles markieren im Code-Feld (Strg+A), löschen, diesen Text einfügen, dann "Commit changes..." → "Commit changes".
-
-1 Nachricht in der Warteschlange. Wird nach der aktuellen Antwort gesendet.
-ja
