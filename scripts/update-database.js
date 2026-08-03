@@ -38,8 +38,11 @@ const BATCH_DELAY_MS = 150;
 // Pause zwischen den 366 Tages-Anfragen (ms) – verhindert Rate-Limiting
 const DAY_DELAY_MS = 400;
 // Maximale Anzahl Personen pro Tag, für die wir Pageviews abfragen
-// (mehr als das bringt selten zusätzliche Erkenntnisse, spart aber viele Requests)
-const MAX_PEOPLE_PER_DAY = 120;
+// (bestimmt, aus wie vielen Kandidaten die Top-Liste ermittelt wird)
+const MAX_PEOPLE_PER_DAY = 60;
+// Wie viele Personen pro Tag am Ende tatsächlich in der Datenbank
+// gespeichert werden (hält die Datei klein, z. B. für kostenloses Hosting)
+const FINAL_PEOPLE_PER_DAY = 3;
 
 function pad(n) {
   return String(n).padStart(2, "0");
@@ -151,6 +154,168 @@ function truncate(text, max = 220) {
   return text.slice(0, max).replace(/\s+\S*$/, "") + "…";
 }
 
+// Häufige Berufsbezeichnungen (männlich/weiblich), die typischerweise im
+// einleitenden Satz eines deutschen Wikipedia-Artikels vorkommen, z. B.
+// "... ist ein deutscher Schauspieler" oder "war eine US-amerikanische
+// Sängerin". Dient als kostenlose Rückfalloption, falls Wikidata für
+// eine Person keinen strukturierten Beruf (P106) hinterlegt hat.
+const PROFESSION_KEYWORDS = [
+  "Schauspielerin", "Schauspieler",
+  "Sängerin", "Sänger",
+  "Musikerin", "Musiker",
+  "Regisseurin", "Regisseur",
+  "Politikerin", "Politiker",
+  "Schriftstellerin", "Schriftsteller",
+  "Malerin", "Maler",
+  "Fußballspielerin", "Fußballspieler",
+  "Autorin", "Autor",
+  "Komponistin", "Komponist",
+  "Journalistin", "Journalist",
+  "Unternehmerin", "Unternehmer",
+  "Wissenschaftlerin", "Wissenschaftler",
+  "Philosophin", "Philosoph",
+  "Physikerin", "Physiker",
+  "Dichterin", "Dichter",
+  "Komikerin", "Komiker",
+  "Moderatorin", "Moderator",
+  "Rennfahrerin", "Rennfahrer",
+  "Tänzerin", "Tänzer",
+  "Fotografin", "Fotograf",
+  "Bildhauerin", "Bildhauer",
+  "Historikerin", "Historiker",
+  "Erfinderin", "Erfinder",
+  "Boxerin", "Boxer",
+  "Basketballspielerin", "Basketballspieler",
+  "Tennisspielerin", "Tennisspieler",
+  "Eishockeyspielerin", "Eishockeyspieler",
+  "Skirennläuferin", "Skirennläufer",
+  "Leichtathletin", "Leichtathlet",
+  "Theaterschauspielerin",
+  "Filmschauspielerin", "Filmschauspieler",
+  "Fernsehmoderatorin", "Fernsehmoderator",
+  "Rapperin", "Rapper",
+  "Model",
+  "Bischöfin", "Bischof",
+  "Astronautin", "Astronaut",
+  "Unternehmensgründerin", "Unternehmensgründer",
+];
+
+// Sucht das am frühesten im Text vorkommende Berufswort. Wikipedia-Sätze
+// nennen den Beruf fast immer direkt am Anfang, daher liefert das erste
+// Treffer meist den korrekten Hauptberuf.
+function guessProfessionFromText(text) {
+  if (!text) return null;
+  let best = null;
+  let bestIndex = Infinity;
+  for (const keyword of PROFESSION_KEYWORDS) {
+    const idx = text.indexOf(keyword);
+    if (idx !== -1 && idx < bestIndex) {
+      bestIndex = idx;
+      best = keyword;
+    }
+  }
+  return best;
+}
+
+// Formatiert das Geburtsdatum (Tag/Monat sind ja durch den Kalendertag
+// bekannt, das Jahr liefert die Wikipedia "On this day"-API)
+function formatBirthDate(month, day, year) {
+  if (!year) return null;
+  try {
+    return new Date(Date.UTC(2000, month - 1, day)).toLocaleDateString("de-DE", {
+      day: "numeric",
+      month: "long",
+    }) + ` ${year}`;
+  } catch {
+    return null;
+  }
+}
+
+// Wandelt ein Wikidata-Zeitformat (z. B. "+1990-03-15T00:00:00Z") in ein
+// lesbares deutsches Datum um. precision: 11 = Tag genau, 10 = Monat,
+// 9 = nur Jahr, kleiner = zu ungenau (wird ignoriert).
+function formatWikidataDate(timeValue) {
+  if (!timeValue || typeof timeValue.time !== "string") return null;
+  const match = timeValue.time.match(/^([+-])(\d+)-(\d\d)-(\d\d)T/);
+  if (!match) return null;
+  const [, sign, yearStr, monthStr, dayStr] = match;
+  const year = parseInt(yearStr, 10);
+  if (sign === "-") return `${year} v. Chr.`;
+  const precision = timeValue.precision;
+  if (precision >= 11) {
+    const date = new Date(Date.UTC(year, parseInt(monthStr, 10) - 1, parseInt(dayStr, 10)));
+    return date.toLocaleDateString("de-DE", { day: "numeric", month: "long", year: "numeric" });
+  }
+  if (precision === 10) {
+    const date = new Date(Date.UTC(year, parseInt(monthStr, 10) - 1, 1));
+    return date.toLocaleDateString("de-DE", { month: "long", year: "numeric" });
+  }
+  if (precision === 9) return String(year);
+  return null; // zu ungenau (Jahrzehnt/Jahrhundert)
+}
+
+// Holt die Wikidata-ID (z. B. "Q1234") zu einem deutschen Wikipedia-Artikel
+async function fetchWikidataId(articleTitle) {
+  const url = `https://de.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(
+    articleTitle
+  )}&prop=pageprops&ppprop=wikibase_item&format=json`;
+  const data = await fetchJson(url);
+  const pages = data && data.query && data.query.pages;
+  if (!pages) return null;
+  const page = Object.values(pages)[0];
+  return (page && page.pageprops && page.pageprops.wikibase_item) || null;
+}
+
+// Holt Todestag (P570), Beruf (P106) und bekanntestes Werk (P800) von Wikidata
+async function fetchWikidataDetails(articleTitle) {
+  const empty = { deathDate: null, profession: null, famousWork: null };
+  const qid = await fetchWikidataId(articleTitle);
+  if (!qid) return empty;
+
+  const claimsUrl = `https://www.wikidata.org/w/api.php?action=wbgetclaims&entity=${qid}&property=P106|P570|P800&format=json`;
+  const claimsData = await fetchJson(claimsUrl);
+  const claims = claimsData && claimsData.claims;
+  if (!claims) return empty;
+
+  const deathClaim = claims.P570 && claims.P570[0];
+  const deathDate = deathClaim
+    ? formatWikidataDate(deathClaim.mainsnak.datavalue && deathClaim.mainsnak.datavalue.value)
+    : null;
+
+  const professionQid =
+    claims.P106 &&
+    claims.P106[0] &&
+    claims.P106[0].mainsnak.datavalue &&
+    claims.P106[0].mainsnak.datavalue.value.id;
+  const workQid =
+    claims.P800 &&
+    claims.P800[0] &&
+    claims.P800[0].mainsnak.datavalue &&
+    claims.P800[0].mainsnak.datavalue.value.id;
+
+  let profession = null;
+  let famousWork = null;
+
+  const labelIds = [professionQid, workQid].filter(Boolean);
+  if (labelIds.length > 0) {
+    const labelsUrl = `https://www.wikidata.org/w/api.php?action=wbgetentities&ids=${labelIds.join(
+      "|"
+    )}&props=labels&languages=de&format=json`;
+    const labelsData = await fetchJson(labelsUrl);
+    const entities = labelsData && labelsData.entities;
+    if (entities) {
+      if (professionQid && entities[professionQid] && entities[professionQid].labels && entities[professionQid].labels.de) {
+        profession = entities[professionQid].labels.de.value;
+      }
+      if (workQid && entities[workQid] && entities[workQid].labels && entities[workQid].labels.de) {
+        famousWork = entities[workQid].labels.de.value;
+      }
+    }
+  }
+
+  return { deathDate, profession, famousWork };
+}
+
 async function processDay(month, day) {
   const key = `${pad(month)}-${pad(day)}`;
   const births = await fetchBirthsForDay(month, day);
@@ -194,11 +359,29 @@ async function processDay(month, day) {
     pageviews30d: 0,
   }));
 
-  const all = [...withViews, ...rest]
-    .map(({ _articleTitle, ...rest }) => rest)
-    .sort((a, b) => b.pageviews30d - a.pageviews30d);
+  const topPeople = [...withViews, ...rest]
+    .sort((a, b) => b.pageviews30d - a.pageviews30d)
+    .slice(0, FINAL_PEOPLE_PER_DAY); // nur die Top-Personen behalten, Datei klein halten
 
-  return { key, people: all };
+  // Für die wenigen Top-Personen zusätzlich Details von Wikidata holen
+  // (Todestag, Beruf, bekanntestes Werk) – das machen wir bewusst nur
+  // für die finale kleine Auswahl, nicht für alle Kandidaten, um die
+  // Anzahl der Anfragen gering zu halten.
+  const enriched = [];
+  for (const person of topPeople) {
+    const details = await fetchWikidataDetails(person._articleTitle);
+    const { _articleTitle, ...rest } = person;
+    enriched.push({
+      ...rest,
+      birthDate: formatBirthDate(month, day, person.year),
+      deathDate: details.deathDate,
+      profession: details.profession || guessProfessionFromText(person.description),
+      famousWork: details.famousWork,
+    });
+    await sleep(300); // kleine Pause zwischen den Wikidata-Anfragen
+  }
+
+  return { key, people: enriched };
 }
 
 async function main() {
